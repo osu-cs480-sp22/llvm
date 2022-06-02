@@ -7,6 +7,16 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/Value.h"
 
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/TargetRegistry.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Target/TargetOptions.h"
+#include "llvm/Target/TargetMachine.h"
+
+
 static llvm::LLVMContext TheContext;
 static llvm::IRBuilder<> TheBuilder(TheContext);
 static llvm::Module* TheModule;
@@ -88,7 +98,95 @@ llvm::Value* ifElseStatement() {
   cond = TheBuilder.CreateFCmpONE(
     cond, numericConstant(0), "ifcond"
   );
+
+  llvm::Function* currFn = TheBuilder.GetInsertBlock()->getParent();
+  llvm::BasicBlock* ifBlock = llvm::BasicBlock::Create(
+    TheContext,
+    "ifBlock",
+    currFn
+  );
+  llvm::BasicBlock* elseBlock = llvm::BasicBlock::Create(
+    TheContext,
+    "elseBlock"
+  );
+  llvm::BasicBlock* continuationBlock = llvm::BasicBlock::Create(
+    TheContext,
+    "continuationBlock"
+  );
+
+  TheBuilder.CreateCondBr(cond, ifBlock, elseBlock);
+
+  TheBuilder.SetInsertPoint(ifBlock);
+  llvm::Value* aTimesB = binaryOperation(
+    variableValue("a"),
+    variableValue("b"),
+    '*'
+  );
+  llvm::Value* ifBlockStmt = assignmentStatement("c", aTimesB);
+  TheBuilder.CreateBr(continuationBlock);
+
+  currFn->getBasicBlockList().push_back(elseBlock);
+  TheBuilder.SetInsertPoint(elseBlock);
+  llvm::Value* aPlusB = binaryOperation(
+    variableValue("a"),
+    variableValue("b"),
+    '+'
+  );
+  llvm::Value* elseBlockStmt = assignmentStatement("c", aPlusB);
+  TheBuilder.CreateBr(continuationBlock);
+
+  currFn->getBasicBlockList().push_back(continuationBlock);
+  TheBuilder.SetInsertPoint(continuationBlock);
+
+  return continuationBlock;
 }
+
+
+void generateObjFile(std::string filename) {
+  std::string targetTriple = llvm::sys::getDefaultTargetTriple();
+  std::cerr << "Target triple: " << targetTriple << std::endl;
+
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmParsers();
+  llvm::InitializeAllAsmPrinters();
+
+  std::string err;
+  const llvm::Target* target = llvm::TargetRegistry::lookupTarget(targetTriple, err);
+  if (!target) {
+    std::cerr << "Error looking up target: " << err << std::endl;
+    return;
+  }
+
+  std::string cpu = "generic";
+  std::string features = "";
+  llvm::TargetOptions options;
+  llvm::TargetMachine* targetMachine = target->createTargetMachine(
+    targetTriple,
+    cpu,
+    features,
+    options,
+    llvm::Optional<llvm::Reloc::Model>()
+  );
+
+  TheModule->setDataLayout(targetMachine->createDataLayout());
+  TheModule->setTargetTriple(targetTriple);
+
+  std::error_code ec;
+  llvm::raw_fd_ostream fd(filename, ec, llvm::sys::fs::OF_None);
+  if (ec) {
+    std::cerr << "Error opening optput file: " << ec.message() << std::endl;
+    return;
+  }
+
+  llvm::legacy::PassManager pm;
+  targetMachine->addPassesToEmitFile(pm, fd, NULL, llvm::CodeGenFileType::CGFT_ObjectFile);
+  pm.run(*TheModule);
+  fd.close();
+}
+
+
 
 int main(int argc, char const *argv[]) {
   TheModule = new llvm::Module("LLVM_Demo_Program", TheContext);
@@ -126,11 +224,15 @@ int main(int argc, char const *argv[]) {
   );
   llvm::Value* assign2 = assignmentStatement("b", expr3);
 
+  llvm::Value* ifElse = ifElseStatement();
+
   // TheBuilder.CreateRetVoid();
   TheBuilder.CreateRet(variableValue("b"));
 
   llvm::verifyFunction(*foo);
   TheModule->print(llvm::outs(), NULL);
+
+  generateObjFile("foo.o");
 
   return 0;
 }
